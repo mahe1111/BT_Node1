@@ -1,0 +1,138 @@
+version: "2.0"
+
+volumes:
+  postgresvol:
+
+services:
+
+  rest-api:
+    build:
+      context: .
+      dockerfile: ./rest_api/Dockerfile
+    image: block-rest-api
+    container_name: rest-api
+    ports:
+      - "8008:8008"
+    volumes:
+      - './rest_api/rest_api/:/project/blocktrack/hc_rest_api/'
+      - './addressing/:/project/blocktrack/hc_rest_api/addressing/'
+      - './protos/:/project/blocktrack/hc_rest_api/protogen/'
+    depends_on:
+      - postgres
+      - validator
+    command: |
+      bash -c "
+        cd /project/blocktrack/hc_rest_api/
+        python3 protogenerator.py
+        python3 main.py -vv --connect tcp://validator:4004 --bind rest-api:8008 --db-host postgres"
+    stop_signal: SIGKILL
+
+  validator:
+    build:
+      context: ./sys_admin
+      dockerfile: Dockerfile
+    image: sawtooth-validator:1.0
+    container_name: sawtooth-validator-default
+    expose:
+      - 4004
+      - 8800
+    volumes: 
+      - './backup/state/:/var/lib/sawtooth/'
+      - './backup/keys/:/etc/sawtooth/keys/'
+    ports:
+      - "4004:4004"
+      - "8800:8800"
+    # start the validator with an empty genesis batch
+    entrypoint: "bash -c \"\
+        sawadm keygen && \
+        sawtooth keygen my_key && \
+        sawtooth-validator -vv \
+          --endpoint tcp://10.21.115.158:8800 \
+          --bind component:tcp://eth0:4004 \
+          --bind network:tcp://eth0:8800 \
+          --bind consensus:tcp://eth0:5050 \
+          --peers tcp://10.21.115.158:8800 \
+          --peers tcp://10.42.136.218:8800 \
+          --peers tcp://10.42.114.22:8800 \
+        \""
+
+  poet-validator-registry-tp-0:
+    image: hyperledger/sawtooth-poet-validator-registry-tp:1.1
+    container_name: sawtooth-poet-validator-registry-tp-0
+    expose:
+      - 4004
+    command: poet-validator-registry-tp -C tcp://validator:4004
+    environment:
+      PYTHONPATH: /project/sawtooth-core/consensus/poet/common
+    stop_signal: SIGKILL
+
+  postgres:
+    image: postgres:12
+    container_name: postgres
+    restart: always
+    volumes:
+      - 'postgresvol:/var/lib/postgresql/data/'
+    environment:
+      POSTGRES_USER: Blocktrack
+      POSTGRES_PASSWORD: Blocktrack
+      POSTGRES_DB: Health_Record
+    ports:
+      - '5432:5432'
+
+  settings-tp:
+    image: hyperledger/sawtooth-settings-tp:1.0
+    container_name: sawtooth-settings-tp-default
+    depends_on:
+      - validator
+    entrypoint: settings-tp -vv -C tcp://validator:4004
+
+  hc-tp:
+    build:
+      context: .
+      dockerfile: ./TP/Dockerfile
+    image: hc_tp:1.0
+    container_name: hc-tp-default
+    volumes:
+      - './TP/hc-tp/:/project/blocktrack/hc_tp/'
+      - './addressing/:/project/blocktrack/hc_tp/addressing/'
+      - './protos/:/project/blocktrack/hc_tp/protogen'
+    depends_on:
+      - validator
+    command: |
+      bash -c "
+        cd /project/blocktrack/hc_tp
+        python3 protogenerator.py
+        chmod +x main.py
+        python3 main.py
+      "
+  
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:6.6.2
+    container_name: elasticsearch
+    environment:
+      - cluster.name=docker-cluster
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    # volumes:
+      # - esdata1:/usr/share/elasticsearch/data
+    ports:
+      - 9200:9200
+
+  blocktrack:
+    build:
+      context: .
+      dockerfile: ./Blocktrack/Dockerfile
+    image: blocktrack_django-apache2:latest
+    container_name: django-apache2
+    ports:
+      - '8005:80'
+      - '3500:3500'
+      - '8006:81'
+    volumes:
+      - ./Blocktrack/conf-file.conf:/etc/apache2/sites-available/000-default.conf
+      - ./Blocktrack:/var/www/html/
+
